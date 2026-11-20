@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>加權報酬指數</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#fcfcfb" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1a1a19" media="(prefers-color-scheme: dark)">
+<style>
+  :root {
+    color-scheme: light;
+    --surface: #fcfcfb;
+    --surface-2: #f1f0ed;
+    --text-1: #0b0b0b;
+    --text-2: #52514e;
+    --text-3: #8a8984;
+    --grid: #e6e5e1;
+    --series: #2a78d6;
+    --border: #d9d8d3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --surface: #1a1a19;
+      --surface-2: #262624;
+      --text-1: #f0efec;
+      --text-2: #c3c2b7;
+      --text-3: #8f8e86;
+      --grid: #33332f;
+      --series: #3987e5;
+      --border: #3d3d39;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--surface); color: var(--text-1);
+    font: 15px/1.5 -apple-system, "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+    padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom));
+  }
+  main { max-width: 960px; margin: 0 auto; }
+  h1 { font-size: 16px; font-weight: 600; margin: 0 0 12px; color: var(--text-2); }
+  .hero { display: flex; flex-wrap: wrap; gap: 4px 24px; align-items: baseline; margin-bottom: 4px; }
+  .hero .big { font-size: 32px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .hero .unit { font-size: 15px; color: var(--text-2); font-weight: 400; margin-left: 4px; }
+  .sub { color: var(--text-2); font-size: 13px; margin-bottom: 16px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin-bottom: 8px; font-size: 14px; }
+  select, button {
+    font: inherit; color: var(--text-1); background: var(--surface-2);
+    border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px;
+  }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; background: transparent; color: var(--text-2); }
+  .seg button[aria-pressed="true"] { background: var(--surface-2); color: var(--text-1); font-weight: 600; }
+  .chart-wrap { position: relative; height: min(62vh, 480px); min-height: 300px; }
+  details { margin-top: 20px; font-size: 14px; }
+  summary { cursor: pointer; color: var(--text-2); }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; margin-top: 8px; }
+  th, td { padding: 4px 8px; text-align: right; border-bottom: 1px solid var(--grid); }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--text-2); font-weight: 500; position: sticky; top: 0; background: var(--surface); }
+  .note { color: var(--text-3); font-size: 12px; margin-top: 16px; }
+  #err { color: #e34948; }
+</style>
+</head>
+<body>
+<main>
+  <h1>台灣發行量加權股價報酬指數（還原除權息）</h1>
+  <div class="hero">
+    <div><span class="big" id="lastPts">—</span><span class="unit">點</span></div>
+    <div><span class="big" id="lastMul">—</span><span class="unit">倍</span></div>
+  </div>
+  <div class="sub" id="sub">載入中…</div>
+
+  <div class="controls">
+    <label>起點（1 倍）<select id="start"></select></label>
+    <span class="seg" role="group" aria-label="縱軸刻度">
+      <button id="logBtn" aria-pressed="true">對數刻度</button>
+      <button id="linBtn" aria-pressed="false">一般刻度</button>
+    </span>
+  </div>
+
+  <div class="chart-wrap"><canvas id="chart" aria-label="每月報酬倍數曲線"></canvas></div>
+  <div id="err"></div>
+
+  <details>
+    <summary>每月資料表</summary>
+    <table>
+      <thead><tr><th>月份（月底日）</th><th>點數</th><th>倍數</th></tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </details>
+
+  <p class="note">
+    每月取該月最後一個交易日的收盤點數。倍數 = 該月月底點數 ÷ 起點月份第一個交易日的收盤點數。
+    資料來源：臺灣證券交易所「發行量加權股價報酬指數」，每個交易日 15:00 後自動更新。
+  </p>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const fmtPts = v => v.toLocaleString('zh-TW', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmtMul = v => v >= 10 ? v.toFixed(1) : v.toFixed(2);
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+let months = [];   // [{ym, first:{date,v}, last:{date,v}}]
+let chart, useLog = true;
+
+// 讀 CSV → 依月份分組，記下每月第一天與最後一天
+async function load() {
+  const res = await fetch('taiex_total_return_daily.csv', { cache: 'no-cache' });
+  if (!res.ok) throw new Error('讀不到資料檔（HTTP ' + res.status + '）');
+  const lines = (await res.text()).replace(/^﻿/, '').trim().split(/\r?\n/).slice(1);
+  const byMonth = new Map();
+  for (const line of lines) {
+    const [date, val] = line.split(',');
+    const v = parseFloat(val);
+    if (!date || isNaN(v)) continue;
+    const ym = date.slice(0, 7);
+    const m = byMonth.get(ym);
+    if (!m) byMonth.set(ym, { ym, first: { date, v }, last: { date, v } });
+    else m.last = { date, v };  // CSV 已按日期排序
+  }
+  months = [...byMonth.values()];
+}
+
+function buildStartSelect() {
+  const sel = $('start');
+  for (const m of months) {
+    const opt = document.createElement('option');
+    opt.value = m.ym;
+    opt.textContent = m.ym.replace('-', ' 年 ') + ' 月';
+    sel.appendChild(opt);
+  }
+  sel.value = months[0].ym;
+  sel.onchange = render;
+}
+
+function render() {
+  const startIdx = months.findIndex(m => m.ym === $('start').value);
+  const base = months[startIdx].first;
+  const rows = months.slice(startIdx).map(m => ({ ym: m.ym, date: m.last.date, pts: m.last.v, mul: m.last.v / base.v }));
+  const latest = rows[rows.length - 1];
+
+  $('lastPts').textContent = fmtPts(latest.pts);
+  $('lastMul').textContent = fmtMul(latest.mul);
+  $('sub').textContent = `${latest.date} 收盤 · 從 ${base.date}（${fmtPts(base.v)} 點）起算`;
+
+  // 資料表（新到舊）
+  const tb = $('tbody');
+  tb.replaceChildren();
+  for (const r of [...rows].reverse()) {
+    const tr = document.createElement('tr');
+    for (const t of [`${r.ym}（${r.date.slice(8)} 日）`, fmtPts(r.pts), fmtMul(r.mul) + ' 倍']) {
+      const td = document.createElement('td'); td.textContent = t; tr.appendChild(td);
+    }
+    tb.appendChild(tr);
+  }
+
+  drawChart(rows);
+}
+
+// 依畫面寬度決定 x 軸每幾年標一次
+function yearStep(nYears) {
+  const w = $('chart').clientWidth || 360;
+  const fit = Math.max(2, Math.floor(w / 48));
+  return [1, 2, 3, 5, 10].find(s => nYears / s <= fit) || 10;
+}
+
+const crosshair = {
+  id: 'crosshair',
+  afterDatasetsDraw(c) {
+    const a = c.tooltip?.getActiveElements?.() || [];
+    if (!a.length) return;
+    const x = a[0].element.x, { top, bottom } = c.chartArea, ctx = c.ctx;
+    ctx.save(); ctx.strokeStyle = css('--text-3'); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, bottom); ctx.stroke(); ctx.restore();
+  }
+};
+
+function drawChart(rows) {
+  const labels = rows.map(r => r.ym);
+  const firstYear = +labels[0].slice(0, 4), nYears = +labels[labels.length - 1].slice(0, 4) - firstYear + 1;
+  const step = yearStep(nYears);
+  const text2 = css('--text-2'), grid = css('--grid'), series = css('--series');
+
+  if (chart) chart.destroy();
+  chart = new Chart($('chart'), {
+    type: 'line',
+    data: { labels, datasets: [{
+      data: rows.map(r => r.mul), borderColor: series, borderWidth: 2,
+      pointRadius: 0, pointHoverRadius: 5, pointHoverBackgroundColor: series,
+      pointHoverBorderColor: css('--surface'), pointHoverBorderWidth: 2, tension: 0
+    }]},
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          displayColors: false, backgroundColor: css('--surface-2'), borderColor: css('--border'), borderWidth: 1,
+          titleColor: text2, bodyColor: css('--text-1'), bodyFont: { size: 14, weight: '600' }, padding: 10,
+          callbacks: {
+            title: it => `${rows[it[0].dataIndex].date}（月底收盤）`,
+            label: it => {
+              const r = rows[it.dataIndex];
+              return [`${fmtPts(r.pts)} 點`, `${fmtMul(r.mul)} 倍`];
+            }
+          }
+        }
+      },
+      scales: {
+        x: {
+          grid: { display: false }, border: { color: grid },
+          ticks: {
+            color: text2, autoSkip: false, maxRotation: 0,
+            callback: (v, i) => {
+              const ym = labels[i], y = +ym.slice(0, 4);
+              return ym.endsWith('-01') && (y - firstYear) % step === 0 ? String(y) : (i === 0 ? ym.slice(0, 4) : '');
+            }
+          }
+        },
+        y: {
+          type: useLog ? 'logarithmic' : 'linear',
+          grid: { color: grid }, border: { display: false },
+          title: { display: true, text: '倍數', color: text2 },
+          ticks: {
+            color: text2,
+            callback: v => {
+              if (useLog) {  // 對數刻度只標 1/2/5 開頭的整齊數字
+                const lead = v / Math.pow(10, Math.floor(Math.log10(v)));
+                if (![1, 2, 5].some(n => Math.abs(lead - n) < 1e-9)) return '';
+              }
+              return (v < 1 ? v.toFixed(1) : v.toLocaleString()) + '×';
+            }
+          }
+        }
+      }
+    },
+    plugins: [crosshair]
+  });
+}
+
+function setScale(log) {
+  useLog = log;
+  $('logBtn').setAttribute('aria-pressed', log);
+  $('linBtn').setAttribute('aria-pressed', !log);
+  render();
+}
+$('logBtn').onclick = () => setScale(true);
+$('linBtn').onclick = () => setScale(false);
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', render);
+
+load().then(() => { buildStartSelect(); render(); })
+      .catch(e => { $('sub').textContent = ''; $('err').textContent = '載入失敗：' + e.message; });
+</script>
+</body>
+</html>
