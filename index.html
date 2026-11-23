@@ -21,6 +21,7 @@
     --text-3: #8a8984;
     --grid: #e6e5e1;
     --series: #2a78d6;
+    --series-2: #eb6834;
     --border: #d9d8d3;
   }
   @media (prefers-color-scheme: dark) {
@@ -33,6 +34,7 @@
       --text-3: #8f8e86;
       --grid: #33332f;
       --series: #3987e5;
+      --series-2: #d95926;
       --border: #3d3d39;
     }
   }
@@ -56,6 +58,9 @@
   .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
   .seg button { border: 0; border-radius: 0; background: transparent; color: var(--text-2); }
   .seg button[aria-pressed="true"] { background: var(--surface-2); color: var(--text-1); font-weight: 600; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 20px; font-size: 14px; color: var(--text-2); margin-bottom: 4px; }
+  .legend b { color: var(--text-1); font-variant-numeric: tabular-nums; }
+  .swatch { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
   .chart-wrap { position: relative; height: min(62vh, 480px); min-height: 300px; }
   details { margin-top: 20px; font-size: 14px; }
   summary { cursor: pointer; color: var(--text-2); }
@@ -84,20 +89,25 @@
     </span>
   </div>
 
+  <div class="legend">
+    <span><i class="swatch" style="background:var(--series)"></i>報酬指數（含息） <b id="legTr">—</b></span>
+    <span><i class="swatch" style="background:var(--series-2)"></i>加權指數（不含息） <b id="legPx">—</b></span>
+  </div>
   <div class="chart-wrap"><canvas id="chart" aria-label="每月報酬倍數曲線"></canvas></div>
   <div id="err"></div>
 
   <details>
     <summary>每月資料表</summary>
     <table>
-      <thead><tr><th>月份（月底日）</th><th>點數</th><th>倍數</th></tr></thead>
+      <thead><tr><th>月份（月底日）</th><th>報酬指數</th><th>倍數</th><th>加權指數</th><th>倍數</th></tr></thead>
       <tbody id="tbody"></tbody>
     </table>
   </details>
 
   <p class="note">
     每月取該月最後一個交易日的收盤點數。倍數 = 該月月底點數 ÷ 起點月份第一個交易日的收盤點數。
-    資料來源：臺灣證券交易所「發行量加權股價報酬指數」，每個交易日 15:00 後自動更新。
+    資料來源：臺灣證券交易所「發行量加權股價報酬指數」與「發行量加權股價指數」，每個交易日 15:00 後自動更新。
+    兩條線的差距，就是股利再投入多賺的部分。
   </p>
 </main>
 
@@ -108,13 +118,14 @@ const fmtPts = v => v.toLocaleString('zh-TW', { minimumFractionDigits: 2, maximu
 const fmtMul = v => v >= 10 ? v.toFixed(1) : v.toFixed(2);
 const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
-let months = [];   // [{ym, first:{date,v}, last:{date,v}}]
+let months = [];        // 報酬指數 [{ym, first:{date,v}, last:{date,v}}]
+let price = new Map();  // 加權指數 ym → {ym, first, last}
 let chart, useLog = true;
 
 // 讀 CSV → 依月份分組，記下每月第一天與最後一天
-async function load() {
-  const res = await fetch('taiex_total_return_daily.csv', { cache: 'no-cache' });
-  if (!res.ok) throw new Error('讀不到資料檔（HTTP ' + res.status + '）');
+async function loadMonths(file) {
+  const res = await fetch(file, { cache: 'no-cache' });
+  if (!res.ok) throw new Error(`讀不到 ${file}（HTTP ${res.status}）`);
   const lines = (await res.text()).replace(/^﻿/, '').trim().split(/\r?\n/).slice(1);
   const byMonth = new Map();
   for (const line of lines) {
@@ -126,7 +137,13 @@ async function load() {
     if (!m) byMonth.set(ym, { ym, first: { date, v }, last: { date, v } });
     else m.last = { date, v };  // CSV 已按日期排序
   }
-  months = [...byMonth.values()];
+  return byMonth;
+}
+
+async function load() {
+  const [tr, px] = await Promise.all([loadMonths('taiex_total_return_daily.csv'), loadMonths('taiex_price_daily.csv')]);
+  months = [...tr.values()];
+  price = px;
 }
 
 function buildStartSelect() {
@@ -144,19 +161,29 @@ function buildStartSelect() {
 function render() {
   const startIdx = months.findIndex(m => m.ym === $('start').value);
   const base = months[startIdx].first;
-  const rows = months.slice(startIdx).map(m => ({ ym: m.ym, date: m.last.date, pts: m.last.v, mul: m.last.v / base.v }));
+  const pBase = price.get(months[startIdx].ym)?.first;
+  const rows = months.slice(startIdx).map(m => {
+    const p = price.get(m.ym)?.last;  // 缺資料的月份留 null，曲線會斷開
+    return {
+      ym: m.ym, date: m.last.date, pts: m.last.v, mul: m.last.v / base.v,
+      ppts: p && pBase ? p.v : null, pmul: p && pBase ? p.v / pBase.v : null
+    };
+  });
   const latest = rows[rows.length - 1];
 
   $('lastPts').textContent = fmtPts(latest.pts);
   $('lastMul').textContent = fmtMul(latest.mul);
   $('sub').textContent = `${latest.date} 收盤 · 從 ${base.date}（${fmtPts(base.v)} 點）起算`;
+  $('legTr').textContent = fmtMul(latest.mul) + ' 倍';
+  $('legPx').textContent = latest.pmul == null ? '—' : fmtMul(latest.pmul) + ' 倍';
 
   // 資料表（新到舊）
   const tb = $('tbody');
   tb.replaceChildren();
   for (const r of [...rows].reverse()) {
     const tr = document.createElement('tr');
-    for (const t of [`${r.ym}（${r.date.slice(8)} 日）`, fmtPts(r.pts), fmtMul(r.mul) + ' 倍']) {
+    const pCells = r.pmul == null ? ['—', '—'] : [fmtPts(r.ppts), fmtMul(r.pmul) + ' 倍'];
+    for (const t of [`${r.ym}（${r.date.slice(8)} 日）`, fmtPts(r.pts), fmtMul(r.mul) + ' 倍', ...pCells]) {
       const td = document.createElement('td'); td.textContent = t; tr.appendChild(td);
     }
     tb.appendChild(tr);
@@ -187,29 +214,35 @@ function drawChart(rows) {
   const labels = rows.map(r => r.ym);
   const firstYear = +labels[0].slice(0, 4), nYears = +labels[labels.length - 1].slice(0, 4) - firstYear + 1;
   const step = yearStep(nYears);
-  const text2 = css('--text-2'), grid = css('--grid'), series = css('--series');
+  const text2 = css('--text-2'), grid = css('--grid');
+  const line = (name, key, color) => ({
+    label: name, data: rows.map(r => r[key]), borderColor: color, backgroundColor: color, borderWidth: 2,
+    pointRadius: 0, pointHoverRadius: 5, pointHoverBackgroundColor: color,
+    pointHoverBorderColor: css('--surface'), pointHoverBorderWidth: 2, tension: 0
+  });
 
   if (chart) chart.destroy();
   chart = new Chart($('chart'), {
     type: 'line',
-    data: { labels, datasets: [{
-      data: rows.map(r => r.mul), borderColor: series, borderWidth: 2,
-      pointRadius: 0, pointHoverRadius: 5, pointHoverBackgroundColor: series,
-      pointHoverBorderColor: css('--surface'), pointHoverBorderWidth: 2, tension: 0
-    }]},
+    data: { labels, datasets: [
+      line('報酬指數', 'mul', css('--series')),
+      line('加權指數', 'pmul', css('--series-2'))
+    ]},
     options: {
       responsive: true, maintainAspectRatio: false, animation: false,
       interaction: { mode: 'index', intersect: false },
       plugins: {
         legend: { display: false },
         tooltip: {
-          displayColors: false, backgroundColor: css('--surface-2'), borderColor: css('--border'), borderWidth: 1,
+          backgroundColor: css('--surface-2'), borderColor: css('--border'), borderWidth: 1,
           titleColor: text2, bodyColor: css('--text-1'), bodyFont: { size: 14, weight: '600' }, padding: 10,
+          boxWidth: 10, boxHeight: 10, boxPadding: 4, usePointStyle: false,
           callbacks: {
             title: it => `${rows[it[0].dataIndex].date}（月底收盤）`,
             label: it => {
               const r = rows[it.dataIndex];
-              return [`${fmtPts(r.pts)} 點`, `${fmtMul(r.mul)} 倍`];
+              const [pts, mul] = it.datasetIndex === 0 ? [r.pts, r.mul] : [r.ppts, r.pmul];
+              return `${it.dataset.label} ${fmtPts(pts)} 點 · ${fmtMul(mul)} 倍`;
             }
           }
         }
